@@ -1,0 +1,15 @@
+[package]
+name = "wasi-crypto-signing-server-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "^1.0.55"
+axum = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
+tokio = { git = "https://github.com/tokio-rs/tokio", branch = "master", features = ["macros", "rt"] }
+wasi-crypto-guest = { git = "https://github.com/WebAssembly/wasi-crypto", rev="fa309ac"}
+
+[dev-dependencies]
+rand = "0.8"
+tower = { version = "^0.4.11", features = ["util"] }
+hyper = { git = "https://github.com/rjzak/hyper", branch = "wasi_wip", features = ["server"] }

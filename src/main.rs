@@ -1,0 +1,165 @@
+extern crate core;
+
+use anyhow::anyhow;
+use std::os::wasi::io::FromRawFd;
+use std::sync::Arc;
+use wasi_crypto_guest::signatures::{Signature, SignatureKeyPair, SignaturePublicKey};
+use axum::{body::Bytes, http::StatusCode, routing::{get, post}, Extension, Router};
+
+const CRYPTO_ALGO:&str = "ECDSA_P384_SHA384";
+
+#[derive(Debug)]
+struct SigningServer {
+    pub keypair: SignatureKeyPair,
+}
+
+impl SigningServer {
+    fn new() -> anyhow::Result<Self> {
+        let keypair = match SignatureKeyPair::generate(&CRYPTO_ALGO) {
+            Ok(k) => k,
+            Err(e) => {
+                return Err(anyhow!("error generating keypair {:?}", e))
+            }
+        };
+        Ok(SigningServer {
+            keypair
+        })
+    }
+
+    fn sign(&self, data: &[u8]) -> anyhow::Result<Signature> {
+        match self.keypair.sign(data) {
+            Ok(s) => Ok(s),
+            Err(e) => return Err(anyhow!("error signing data {:?}", e))
+        }
+    }
+
+    fn pub_key(&self) -> anyhow::Result<SignaturePublicKey> {
+        match self.keypair.publickey() {
+            Ok(s) => Ok(s),
+            Err(e) => return Err(anyhow!("error retrieving public key {:?}", e))
+        }
+    }
+
+    fn pub_key_raw(&self) -> anyhow::Result<Vec<u8>> {
+        match self.pub_key() {
+            Ok(k) => match k.raw() {
+                Ok(r) => Ok(r),
+                Err(e) => return Err(anyhow!("error retrieving public key {:?}", e))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn validate_signature(&self, sig: Vec<u8>, data: Vec<u8>) -> bool {
+        let signature_obj = match Signature::from_raw(&CRYPTO_ALGO, sig) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Cannot load signature: {:?}", e);
+                return false;
+            }
+        };
+
+        match self.pub_key().unwrap().signature_verify(data, &signature_obj) {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let server = SigningServer::new()?;
+    println!("Keypair generated.");
+
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(3) };
+    std_listener.set_nonblocking(true).unwrap();
+    axum::Server::from_tcp(std_listener)
+        .unwrap()
+        .serve(app(server).into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+fn app(state: SigningServer) -> Router {
+    Router::new()
+        .route("/", post(do_signing))
+        .route("/", get(get_key))
+        .layer(Extension(Arc::new(state)))
+}
+
+async fn get_key(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<u8>, StatusCode> {
+    match state.pub_key_raw() {
+        Ok(k) => {
+          Ok(k)
+        },
+        Err(_) => {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+}
+
+async fn do_signing(
+    body: Bytes,
+    Extension(state): Extension<Arc<SigningServer>>,
+) -> Result<Vec<u8>, StatusCode> {
+    let sig = state.sign(&body).or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let signature_raw = match sig.raw() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error getting signature bytes: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    Ok(signature_raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::request::Request;
+    use axum::body::Body;
+    use tower::ServiceExt; // for `app.oneshot()`
+
+    #[tokio::test]
+    async fn test_sign() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
+        assert!(random_bytes.len() > 0);
+
+        let server = SigningServer::new().unwrap();
+        let sig = server.sign(&random_bytes).unwrap();
+        let signature_raw = sig.raw().unwrap();
+        assert_eq!(signature_raw.len(), 96);
+    }
+
+    #[tokio::test]
+    async fn test_get_pub_key() {
+        let server = SigningServer::new().unwrap();
+        let pubkey = server.pub_key_raw().unwrap();
+        assert_eq!(pubkey.len(), 49);
+
+        SignaturePublicKey::from_raw(&CRYPTO_ALGO, pubkey).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
+        assert!(random_bytes.len() > 0);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(random_bytes.clone()))
+            .unwrap();
+
+        let server = SigningServer::new().unwrap();
+        let pubkey = server.pub_key().unwrap();
+        let response = app(server).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
+        pubkey.signature_verify(random_bytes, &signature_obj).unwrap();
+    }
+}
