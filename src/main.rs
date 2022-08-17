@@ -6,7 +6,7 @@ use std::sync::Arc;
 use wasi_crypto_guest::signatures::{Signature, SignatureKeyPair, SignaturePublicKey};
 use axum::{body::Bytes, http::StatusCode, routing::{get, post}, Extension, Router};
 
-const CRYPTO_ALGO:&str = "ECDSA_P384_SHA384";
+const CRYPTO_ALGO:&'static str = "ECDSA_P384_SHA384";
 
 #[derive(Debug)]
 struct SigningServer {
@@ -86,6 +86,8 @@ fn app(state: SigningServer) -> Router {
     Router::new()
         .route("/", post(do_signing))
         .route("/", get(get_key))
+        .route("/pem", post(do_signing_pem))
+        .route("/pem", get(get_key_pem))
         .layer(Extension(Arc::new(state)))
 }
 
@@ -95,7 +97,19 @@ async fn get_key(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<
           Ok(k)
         },
         Err(_) => {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_key_pem(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<u8>, StatusCode> {
+    // Untested
+    match state.keypair.pem() {
+        Ok(k) => {
+            Ok(k)
+        },
+        Err(_) => {
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }
@@ -115,6 +129,24 @@ async fn do_signing(
     Ok(signature_raw)
 }
 
+async fn do_signing_pem(
+    body: Bytes,
+    Extension(state): Extension<Arc<SigningServer>>,
+) -> Result<Vec<u8>, StatusCode> {
+    // Untested
+    let sig = state.sign(&body).or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let signature_raw = match sig.der() {
+        Ok(s) => {
+            base64::encode(s).into()
+        },
+        Err(e) => {
+            eprintln!("Error getting signature bytes: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    Ok(signature_raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn test_sign() {
         let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
-        assert!(random_bytes.len() > 0);
+        assert_eq!(random_bytes.len(), 1024);
 
         let server = SigningServer::new().unwrap();
         let sig = server.sign(&random_bytes).unwrap();
@@ -145,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn test_server() {
         let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
-        assert!(random_bytes.len() > 0);
+        assert_eq!(random_bytes.len(), 1024);
 
         let req = Request::builder()
             .method("POST")
@@ -161,5 +193,33 @@ mod tests {
         let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
         pubkey.signature_verify(random_bytes, &signature_obj).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_fail() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
+        assert_eq!(random_bytes.len(), 1024);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(Body::from(random_bytes))
+            .unwrap();
+
+        let server = SigningServer::new().unwrap();
+        let pubkey = server.pub_key().unwrap();
+        let response = app(server).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Different random bytes so the signature verification should fail
+        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
+        let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
+        match pubkey.signature_verify(random_bytes, &signature_obj) {
+            Ok(_) => {
+                assert!(false, "this should fail!")
+            }
+            Err(_) => {} // Should be an error!
+        }
     }
 }
