@@ -4,5 +4,6 @@ rustflags = ["--cfg", "tokio_unstable"]
 
 [target.wasm32-wasi]
 # runner = ["enarx", "run", "--wasmcfgfile", "Enarx.toml"]
-# runner = ["wasmtime", "run", "--wasi-modules", "experimental-wasi-crypto"]
-runner = ["./wasmtime", "run", "--wasi-modules", "experimental-wasi-crypto"]
+# runner = ["./enarx", "run", "--wasmcfgfile", "Enarx.toml"]
+# runner = ["wasmtime", "run", "--wasi-modules", "experimental-wasi-crypto", "--tcplisten", "127.0.0.1:8080", "--env", "FD_COUNT=1"]
+runner = ["./wasmtime", "run", "--wasi-modules", "experimental-wasi-crypto", "--tcplisten", "127.0.0.1:8080", "--env", "FD_COUNT=1"]
