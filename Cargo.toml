@@ -1,7 +1,11 @@
 [patch.crates-io]
+#axum = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
+#axum-core = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
+#axum-extra = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
+#axum-macros = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
 tokio = { git = "https://github.com/tokio-rs/tokio", branch = "master" }
+tokio-macros = { git = "https://github.com/tokio-rs/tokio", branch = "master" }
 tokio-util = { git = "https://github.com/tokio-rs/tokio", branch = "master" }
-tower-http = { git = "https://github.com/rjzak/tower-http", branch = "wasi_wip" }
 hyper = { git = "https://github.com/rjzak/hyper", branch = "wasi_wip" }
 
 [package]
@@ -11,9 +15,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "^1.0.55"
-axum = { git = "https://github.com/rjzak/axum", branch = "wasi_wip" }
+axum = { version = "0.5.15", features = ["headers"] }
 base64 = "0.13.0"
-tokio = { git = "https://github.com/tokio-rs/tokio", branch = "master", features = ["macros", "rt"] }
+tokio = { version = "1.20.1", features = ["macros", "rt"] }
 wasi-crypto-guest = { git = "https://github.com/WebAssembly/wasi-crypto", rev="fa309ac"}
 
 [dev-dependencies]
