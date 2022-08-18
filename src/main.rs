@@ -96,7 +96,8 @@ async fn get_key(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<
         Ok(k) => {
           Ok(k)
         },
-        Err(_) => {
+        Err(e) => {
+            eprintln!("Error getting key as bytes: {:?}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -104,11 +105,12 @@ async fn get_key(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<
 
 async fn get_key_pem(Extension(state): Extension<Arc<SigningServer>>) -> Result<Vec<u8>, StatusCode> {
     // Untested
-    match state.keypair.pem() {
+    match state.keypair.pkcs8() {
         Ok(k) => {
             Ok(k)
         },
-        Err(_) => {
+        Err(e) => {
+            eprintln!("Error getting key as pem: {:?}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -154,10 +156,12 @@ mod tests {
     use axum::body::Body;
     use tower::ServiceExt; // for `app.oneshot()`
 
+    const RANDOM_SIZE:usize = 2048;
+
     #[tokio::test]
-    async fn test_sign() {
-        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
-        assert_eq!(random_bytes.len(), 1024);
+    async fn test_signing_works() {
+        let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| { rand::random::<u8>() }).collect();
+        assert_eq!(random_bytes.len(), RANDOM_SIZE);
 
         let server = SigningServer::new().unwrap();
         let sig = server.sign(&random_bytes).unwrap();
@@ -166,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_pub_key() {
+    async fn test_get_pub_key_valid_from_bytes() {
         let server = SigningServer::new().unwrap();
         let pubkey = server.pub_key_raw().unwrap();
         assert_eq!(pubkey.len(), 49);
@@ -175,9 +179,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_server() {
-        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
-        assert_eq!(random_bytes.len(), 1024);
+    async fn test_server_process() {
+        let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| { rand::random::<u8>() }).collect();
+        assert_eq!(random_bytes.len(), RANDOM_SIZE);
 
         let req = Request::builder()
             .method("POST")
@@ -197,8 +201,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_fail() {
-        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
-        assert_eq!(random_bytes.len(), 1024);
+        let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| { rand::random::<u8>() }).collect();
+        assert_eq!(random_bytes.len(), RANDOM_SIZE);
 
         let req = Request::builder()
             .method("POST")
@@ -212,7 +216,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Different random bytes so the signature verification should fail
-        let random_bytes: Vec<u8> = (0..1024).map(|_| { rand::random::<u8>() }).collect();
+        let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| { rand::random::<u8>() }).collect();
         let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
         match pubkey.signature_verify(random_bytes, &signature_obj) {
