@@ -118,27 +118,33 @@ mod tests {
     use axum::body::Body;
     use axum::http::request::Request;
     use tower::ServiceExt; // for `app.oneshot()`
+    use wasi_crypto_guest::signatures::{Signature, SignaturePublicKey};
 
     const RANDOM_SIZE: usize = 2048;
-
-    #[tokio::test]
-    async fn test_signing_works() {
-        let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| rand::random::<u8>()).collect();
-        assert_eq!(random_bytes.len(), RANDOM_SIZE);
-
-        let server = SigningServer::new().unwrap();
-        let sig = server.sign(&random_bytes).unwrap();
-        let signature_raw = sig.raw().unwrap();
-        assert_eq!(signature_raw.len(), 96);
-    }
+    const TEST_CRYPTO_ALGO:&'static str = "ES384";
 
     #[tokio::test]
     async fn test_get_pub_key_valid_from_bytes() {
-        let server = SigningServer::new().unwrap();
-        let pubkey = server.pub_key_raw().unwrap();
-        assert_eq!(pubkey.len(), 49);
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/{}", TEST_CRYPTO_ALGO))
+            .body(Body::from(""))
+            .unwrap();
 
-        SignaturePublicKey::from_raw(&CRYPTO_ALGO, pubkey).unwrap();
+        let response = app().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let signature_response = hyper::body::to_bytes(response.into_body()).await.unwrap().to_vec();
+        let jwk_obj:Jwk = serde_json::from_slice(&signature_response).unwrap();
+
+        let mut sec_bytes = Vec::new();
+        sec_bytes.push(4u8);
+        let mut x = base64::decode_config(&jwk_obj.x.as_bytes(), base64::URL_SAFE_NO_PAD).unwrap();
+        sec_bytes.append(&mut x);
+        let mut y = base64::decode_config(&jwk_obj.y.as_bytes(), base64::URL_SAFE_NO_PAD).unwrap();
+        sec_bytes.append(&mut y);
+
+        SignaturePublicKey::from_sec(ALGS.get(TEST_CRYPTO_ALGO).unwrap(), sec_bytes).unwrap();
     }
 
     #[tokio::test]
@@ -148,20 +154,29 @@ mod tests {
 
         let req = Request::builder()
             .method("POST")
-            .uri("/")
+            .uri(format!("/{}", TEST_CRYPTO_ALGO))
             .body(Body::from(random_bytes.clone()))
             .unwrap();
 
-        let server = SigningServer::new().unwrap();
-        let pubkey = server.pub_key().unwrap();
-        let response = app(server).oneshot(req).await.unwrap();
+        let response = app().oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
-        pubkey
-            .signature_verify(random_bytes, &signature_obj)
-            .unwrap();
+        let signature_response = hyper::body::to_bytes(response.into_body()).await.unwrap().to_vec();
+        let mut signature = signature_response.split(|item| *item == b'.');
+        signature.next(); // first item is base64("algo:<the_algo>")
+        signature.next(); // second item is base64("<the_data>")
+        let signature_decoded = base64::decode_config(signature.next().unwrap(), base64::URL_SAFE_NO_PAD).unwrap();
+        assert_eq!(signature_decoded.len(), 96);
+        let signature_obj = Signature::from_raw(ALGS.get(TEST_CRYPTO_ALGO).unwrap(), signature_decoded).unwrap();
+        let mut lock = KEYS.lock().await;
+        let keypair = lock.keypair(TEST_CRYPTO_ALGO).unwrap();
+        let pubkey = keypair.publickey().unwrap();
+
+        let hdr = base64::encode_config(format!("{{alg:\"{}\"}}", TEST_CRYPTO_ALGO), base64::URL_SAFE_NO_PAD);
+        let b64 = base64::encode_config(random_bytes, base64::URL_SAFE_NO_PAD);
+        let env = format!("{}.{}", hdr, b64);
+
+        pubkey.signature_verify(env.as_bytes(), &signature_obj).unwrap();
     }
 
     #[tokio::test]
@@ -171,24 +186,32 @@ mod tests {
 
         let req = Request::builder()
             .method("POST")
-            .uri("/")
-            .body(Body::from(random_bytes))
+            .uri(format!("/{}", TEST_CRYPTO_ALGO))
+            .body(Body::from(random_bytes.clone()))
             .unwrap();
 
-        let server = SigningServer::new().unwrap();
-        let pubkey = server.pub_key().unwrap();
-        let response = app(server).oneshot(req).await.unwrap();
+        let response = app().oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Different random bytes so the signature verification should fail
+        let signature_response = hyper::body::to_bytes(response.into_body()).await.unwrap().to_vec();
+        let mut signature = signature_response.split(|item| *item == b'.');
+        signature.next(); // first item is base64("algo:<the_algo>")
+        signature.next(); // second item is base64("<the_data>")
+        let signature_decoded = base64::decode_config(signature.next().unwrap(), base64::URL_SAFE_NO_PAD).unwrap();
+        assert_eq!(signature_decoded.len(), 96);
+        let signature_obj = Signature::from_raw(ALGS.get(TEST_CRYPTO_ALGO).unwrap(), signature_decoded).unwrap();
+        let mut lock = KEYS.lock().await;
+        let keypair = lock.keypair(TEST_CRYPTO_ALGO).unwrap();
+        let pubkey = keypair.publickey().unwrap();
+
+        let hdr = base64::encode_config(format!("{{alg:\"{}\"}}", TEST_CRYPTO_ALGO), base64::URL_SAFE_NO_PAD);
         let random_bytes: Vec<u8> = (0..RANDOM_SIZE).map(|_| rand::random::<u8>()).collect();
-        let signature = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let signature_obj = Signature::from_raw(&CRYPTO_ALGO, signature).unwrap();
-        match pubkey.signature_verify(random_bytes, &signature_obj) {
-            Ok(_) => {
-                assert!(false, "this should fail!")
-            }
-            Err(_) => {} // Should be an error!
+        let b64 = base64::encode_config(random_bytes, base64::URL_SAFE_NO_PAD);
+        let env = format!("{}.{}", hdr, b64);
+
+        match pubkey.signature_verify(env.as_bytes(), &signature_obj) {
+            Ok(_) => assert!(false),
+            Err(_) => {}, // should fail
         }
     }
 }
